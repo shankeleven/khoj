@@ -192,7 +192,7 @@ fn entry() -> Result<(), ()> {
             })?;
 
             let mut index_path = Path::new(&dir_path).to_path_buf();
-            index_path.push(".seroost.json");
+            index_path.push(".finder.json");
 
             let address = args.next().unwrap_or("127.0.0.1:6969".to_string());
 
