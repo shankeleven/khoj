@@ -38,35 +38,69 @@ struct SearchResult {
 /// Represents your search index.
 struct Index {
     model: Model,
+    /// Cached filename index for fast filename searches
+    filename_cache: Vec<(PathBuf, String)>, // (path, lowercase_filename)
 }
 
 impl Index {
     fn new() -> Self {
-        Self { model: Model::default() }
+        Self { 
+            model: Model::default(),
+            filename_cache: Vec::new(),
+        }
+    }
+    
+    /// Build the filename cache once during initialization
+    fn build_filename_cache(&mut self) {
+        if let Ok(current_dir) = std::env::current_dir() {
+            self.collect_filenames(&current_dir);
+        }
+    }
+    
+    fn collect_filenames(&mut self, dir: &Path) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                
+                if path.is_file() {
+                    if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                        self.filename_cache.push((path.clone(), filename.to_lowercase()));
+                    }
+                } else if path.is_dir() && !path.file_name().unwrap_or_default().to_str().unwrap_or("").starts_with('.') {
+                    // Recursively collect from subdirectories (skip hidden dirs)
+                    self.collect_filenames(&path);
+                }
+            }
+        }
     }
 
     fn search(&self, query: &str) -> Vec<SearchResult> {
-        if query.is_empty() {
+        if query.is_empty() || query.len() < 2 {
             return Vec::new();
         }
 
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        
         // Use the model's built-in search functionality for content search
         let query_chars: Vec<char> = query.chars().collect();
-        let search_results = self.model.search_query(&query_chars);
+        let content_search_results = self.model.search_query(&query_chars);
         
         let mut results = Vec::new();
+        let mut processed_paths = std::collections::HashSet::new();
         
-        for (path, score) in search_results.iter() {
+        // First, add content search results
+        for (path, score) in content_search_results.iter() {
             // Only include results with a meaningful score (filter out very low relevance)
             if *score < 0.001 {
                 continue;
             }
             
+            processed_paths.insert(path.clone());
+            
             // Get a preview line from the file content
             let preview_line = if let Ok(content) = std::fs::read_to_string(path) {
                 // Find the first line containing any of the query terms
-                let query_lower = query.to_lowercase();
-                let query_words: Vec<&str> = query_lower.split_whitespace().collect();
                 let mut found_line = None;
                 
                 // Look for lines that contain the query terms
@@ -107,11 +141,55 @@ impl Index {
                 score: (score * 1000.0) as i64,
             });
         }
+        
+        // Then, add filename search results for files not already found by content search
+        self.add_filename_search_results_fast(&mut results, &mut processed_paths, &query_words);
 
         // Sort by score (highest first) and limit results
         results.sort_by(|a, b| b.score.cmp(&a.score));
         results.truncate(20); // Limit to top 20 results
         results
+    }
+    
+    fn add_filename_search_results_fast(&self, results: &mut Vec<SearchResult>, processed_paths: &mut std::collections::HashSet<PathBuf>, query_words: &[&str]) {
+        // Use cached filenames for fast search
+        for (path, filename_lower) in &self.filename_cache {
+            // Skip if already processed by content search
+            if processed_paths.contains(path) {
+                continue;
+            }
+            
+            let mut filename_score = 0;
+            
+            for word in query_words {
+                if filename_lower.contains(word) {
+                    // Higher score for exact filename matches
+                    filename_score += if filename_lower == *word { 100 } else { 50 };
+                }
+            }
+            
+            if filename_score > 0 {
+                processed_paths.insert(path.clone());
+                
+                // Get preview for filename matches
+                let preview_line = if let Ok(content) = std::fs::read_to_string(path) {
+                    content.lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("Empty file")
+                        .trim()
+                        .to_string()
+                } else {
+                    "Could not read file".to_string()
+                };
+                
+                results.push(SearchResult {
+                    file_path: path.clone(),
+                    preview_line: format!("[FILENAME MATCH] {}", preview_line),
+                    line_number: 1,
+                    score: filename_score,
+                });
+            }
+        }
     }
 }
 
@@ -130,6 +208,8 @@ struct App {
     preview_content: String,
     /// Styled preview content for highlighting
     preview_spans: Vec<Line<'static>>,
+    /// Last search query to avoid redundant searches
+    last_search_query: String,
 }
 
 impl App {
@@ -142,6 +222,7 @@ impl App {
             results_state: ListState::default(),
             preview_content: "Type to search files...".to_string(),
             preview_spans: vec![Line::from("Type to search files...")],
+            last_search_query: String::new(),
         }
     }
 
@@ -191,6 +272,12 @@ impl App {
 
     /// Updates the search results based on the current query.
     fn update_search_results(&mut self) {
+        // Only search if query has actually changed
+        if self.query == self.last_search_query {
+            return;
+        }
+        
+        self.last_search_query = self.query.clone();
         self.results = self.index.search(&self.query);
 
         if !self.results.is_empty() {
@@ -238,6 +325,9 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     // Create index with the populated model
     let mut index = Index::new();
     index.model = final_model;
+    
+    // Build filename cache for fast filename searches
+    index.build_filename_cache();
 
     // Setup terminal
     enable_raw_mode()?;
