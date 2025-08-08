@@ -16,11 +16,13 @@ use std::{
     collections::VecDeque,
     env,
     error::Error,
+    fs::File,
     io,
+    io::{BufRead, BufReader, BufWriter},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use std::io::{BufRead, BufReader};
+
 use crate::model::{Model};
 use crate::add_folder_to_model;
 
@@ -48,24 +50,24 @@ struct Index {
 
 impl Index {
     fn new() -> Self {
-        Self { 
+        Self {
             model: Model::default(),
             filename_cache: Vec::new(),
         }
     }
-    
+
     /// Build the filename cache once during initialization
     fn build_filename_cache(&mut self) {
         if let Ok(current_dir) = std::env::current_dir() {
             self.collect_filenames(&current_dir);
         }
     }
-    
+
     fn collect_filenames(&mut self, dir: &Path) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                
+
                 if path.is_file() {
                     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                         self.filename_cache.push((path.clone(), filename.to_lowercase()));
@@ -115,7 +117,7 @@ impl Index {
 
         results
     }
-    
+
     fn add_filename_search_results_fast(&self, results: &mut Vec<SearchResult>, processed_paths: &mut std::collections::HashSet<PathBuf>, query_words: &[&str]) {
         for (path, filename_lower) in &self.filename_cache {
             if processed_paths.contains(path) { continue; }
@@ -293,13 +295,40 @@ impl App {
 }
 
 pub fn main() -> Result<(), Box<dyn Error>> {
-    // Perform indexing first
+    // Parse CLI args for --refresh
+    let args: Vec<String> = env::args().collect();
+    let refresh = args.iter().any(|a| a == "refresh");
+
+    // Determine working directory and index path
     let current_dir = env::current_dir()?;
-    
-    // Create the model and index it
-    let wrapped_model = Arc::new(Mutex::new(Model::default()));
-    add_folder_to_model(&current_dir, Arc::clone(&wrapped_model), &mut 0).map_err(|_| "Failed to index folder")?;
-    
+    let index_path = current_dir.join(".finder.json");
+
+    // Prepare model, either by loading existing index or indexing afresh
+    let wrapped_model: Arc<Mutex<Model>> = if !refresh && index_path.try_exists().unwrap_or(false) {
+        // Load existing index
+        match File::open(&index_path) {
+            Ok(file) => {
+                let reader = BufReader::new(file);
+                let model: Model = serde_json::from_reader(reader)?;
+                Arc::new(Mutex::new(model))
+            }
+            Err(_) => Arc::new(Mutex::new(Model::default())),
+        }
+    } else {
+        // Build a new index and save it
+        let wrapped = Arc::new(Mutex::new(Model::default()));
+        let mut processed = 0;
+        add_folder_to_model(&current_dir, Arc::clone(&wrapped), &mut processed).map_err(|_| "Failed to index folder")?;
+        if processed > 0 {
+            if let Ok(file) = File::create(&index_path) {
+                let writer = BufWriter::new(file);
+                let model = wrapped.lock().unwrap();
+                serde_json::to_writer(writer, &*model)?;
+            }
+        }
+        wrapped
+    };
+
     // Extract the model from the Arc<Mutex<>>
     let final_model = match Arc::try_unwrap(wrapped_model) {
         Ok(mutex) => match mutex.into_inner() {
@@ -308,11 +337,11 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         },
         Err(_) => return Err("Failed to extract model from Arc".into()),
     };
-    
+
     // Create index with the populated model
     let mut index = Index::new();
     index.model = final_model;
-    
+
     // Build filename cache for fast filename searches
     index.build_filename_cache();
 
@@ -424,14 +453,14 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .parent()
                 .and_then(|p| p.to_str())
                 .unwrap_or("");
-            
+
             // Show filename, path, and preview of the matching content
             let preview = if res.preview_line.len() > 50 {
                 format!("{}...", &res.preview_line[..47])
             } else {
                 res.preview_line.clone()
             };
-            
+
             ListItem::new(format!("{}\n  {}\n  → {}", file_name, dir_path, preview))
                 .style(Style::default().fg(Color::White))
         })
@@ -551,19 +580,19 @@ fn get_enhanced_preview_with_styling(file_path: &Path, query: &str) -> Result<(S
 fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Line<'static> {
     let mut spans = vec![Span::raw(prefix.to_string())];
     let mut remaining = line.to_string();
-    
+
     // Process the line to find and highlight matches
     while !remaining.is_empty() {
         let mut found_match = false;
         let mut earliest_pos = remaining.len();
         let mut match_len = 0;
-        
+
         // Find the earliest match in the remaining text
         for word in query_words {
             if !word.is_empty() && word.len() > 1 {
                 let remaining_lower = remaining.to_lowercase();
                 let word_lower = word.to_lowercase();
-                
+
                 if let Some(pos) = remaining_lower.find(&word_lower) {
                     if pos < earliest_pos {
                         earliest_pos = pos;
@@ -573,21 +602,21 @@ fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Li
                 }
             }
         }
-        
+
         if found_match {
             // Add text before the match
             if earliest_pos > 0 {
                 let before = &remaining[..earliest_pos];
                 spans.push(Span::raw(before.to_string()));
             }
-            
+
             // Add the highlighted match
             let matched_text = &remaining[earliest_pos..earliest_pos + match_len];
             spans.push(Span::styled(
                 matched_text.to_string(),
                 Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)
             ));
-            
+
             // Update remaining text
             remaining = remaining[earliest_pos + match_len..].to_string();
         } else {
@@ -596,7 +625,7 @@ fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Li
             break;
         }
     }
-    
+
     Line::from(spans)
 }
 
