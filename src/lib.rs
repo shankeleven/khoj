@@ -75,13 +75,25 @@ fn parse_entire_xml_file(file_path: &Path) -> Result<String, ()> {
 
 pub fn parse_entire_file_by_extension(file_path: &Path) -> Result<String, ()> {
     let extension = match file_path.extension() {
-        Some(ext) => ext.to_string_lossy(),
+        Some(ext) => ext.to_string_lossy().to_ascii_lowercase(),
         None => return Err(()),
     };
-    match extension.as_ref() {
+    match extension.as_str() {
         "xhtml" | "xml" => parse_entire_xml_file(file_path),
-        // TODO: specialized parser for markdown files
-        "txt" | "md" => parse_entire_txt_file(file_path),
+        // Treat common source and config files as plain UTF-8 text
+        "txt" | "md"
+        | "rs" | "js" | "jsx" | "ts" | "tsx"
+        | "json" | "toml" | "yaml" | "yml"
+        | "py" | "go" | "java" | "kt" | "kts"
+        | "c" | "h" | "hpp" | "hh" | "cpp" | "cc" | "cxx"
+        | "cs" | "rb" | "php"
+        | "html" | "htm" | "css" | "scss" | "less"
+        | "mdx" | "ini" | "cfg" | "conf"
+        | "sh" | "bash" | "zsh" | "fish"
+        | "pl" | "sql" | "gradle" | "properties"
+        | "r" | "tex" | "rst"
+        | "vue" | "svelte" | "dart" | "erl" | "ex" | "exs" | "lua" | "nim"
+            => parse_entire_txt_file(file_path),
         "pdf" => parse_entire_pdf_file(file_path),
         _ => Err(()),
     }

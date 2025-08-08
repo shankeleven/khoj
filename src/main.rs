@@ -80,8 +80,20 @@ fn parse_entire_file_by_extension(file_path: &Path) -> Result<String, ()> {
     })?.to_string_lossy();
     match extension.as_ref() {
         "xhtml" | "xml" => parse_entire_xml_file(file_path),
-        // TODO: specialized parser for markdown files
-        "txt" | "md" => parse_entire_txt_file(file_path),
+        // Treat common source and config files as plain UTF-8 text
+        "txt" | "md"
+        | "rs" | "js" | "jsx" | "ts" | "tsx"
+        | "json" | "toml" | "yaml" | "yml"
+        | "py" | "go" | "java" | "kt" | "kts"
+        | "c" | "h" | "hpp" | "hh" | "cpp" | "cc" | "cxx"
+        | "cs" | "rb" | "php"
+        | "html" | "htm" | "css" | "scss" | "less"
+        | "mdx" | "ini" | "cfg" | "conf"
+        | "sh" | "bash" | "zsh" | "fish"
+        | "pl" | "sql" | "gradle" | "properties"
+        | "r" | "tex" | "rst"
+        | "vue" | "svelte" | "dart" | "erl" | "ex" | "exs" | "lua" | "nim"
+            => parse_entire_txt_file(file_path),
         "pdf" => parse_entire_pdf_file(file_path),
         _ => {
             eprintln!("ERROR: can't detect file type of {file_path}: unsupported extension {extension}",
@@ -150,12 +162,25 @@ pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed:
         }
 
         let extension = match file_path.extension() {
-            Some(ext) => ext.to_str().unwrap_or(""),
+            Some(ext) => ext.to_str().unwrap_or("").to_ascii_lowercase(),
             None => continue 'next_file,
         };
 
-        match extension {
-            "txt" | "md" | "xml" | "xhtml" | "pdf" => {}
+        match extension.as_str() {
+            // Allowlist: text, markup, source code, configs
+            "txt" | "md" | "xml" | "xhtml" | "pdf"
+            | "rs" | "js" | "jsx" | "ts" | "tsx"
+            | "json" | "toml" | "yaml" | "yml"
+            | "py" | "go" | "java" | "kt" | "kts"
+            | "c" | "h" | "hpp" | "hh" | "cpp" | "cc" | "cxx"
+            | "cs" | "rb" | "php"
+            | "html" | "htm" | "css" | "scss" | "less"
+            | "mdx" | "ini" | "cfg" | "conf"
+            | "sh" | "bash" | "zsh" | "fish"
+            | "pl" | "sql" | "gradle" | "properties"
+            | "r" | "tex" | "rst"
+            | "vue" | "svelte" | "dart" | "erl" | "ex" | "exs" | "lua" | "nim"
+                => { /* supported */ }
             _ => continue 'next_file,
         }
 
