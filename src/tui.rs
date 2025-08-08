@@ -13,12 +13,14 @@ use ratatui::{
 };
 use std::sync::{Arc, Mutex};
 use std::{
+    collections::VecDeque,
     env,
     error::Error,
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use std::io::{BufRead, BufReader};
 use crate::model::{Model};
 use crate::add_folder_to_model;
 
@@ -33,6 +35,8 @@ struct SearchResult {
     line_number: usize,
     /// Score from the fuzzy matcher.
     score: i64,
+    /// Whether this result came from a filename match (not content)
+    is_filename_match: bool,
 }
 
 /// Represents your search index.
@@ -81,100 +85,97 @@ impl Index {
 
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-        
-        // Use the model's built-in search functionality for content search
         let query_chars: Vec<char> = query.chars().collect();
+
+        // Content search first (no file I/O here)
         let content_search_results = self.model.search_query(&query_chars);
-        
         let mut results = Vec::new();
         let mut processed_paths = std::collections::HashSet::new();
-        
-        // First, add content search results
+
         for (path, score) in content_search_results.iter() {
             processed_paths.insert(path.clone());
-            
-            // Get a preview line from the file content
-            let preview_line = if let Ok(content) = std::fs::read_to_string(path) {
-                // Find the first line containing any of the query terms
-                let mut found_line = None;
-                
-                // Look for lines that contain the query terms
-                for line in content.lines() {
-                    let line_lower = line.to_lowercase();
-                    // Check if the line contains any of the query words
-                    if query_words.iter().any(|word| line_lower.contains(word)) {
-                        found_line = Some(line.trim().to_string());
-                        break;
-                    }
-                }
-                
-                // If no specific line found, use the first non-empty line
-                found_line.unwrap_or_else(|| {
-                    content.lines()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("No preview available")
-                        .trim()
-                        .to_string()
-                })
-            } else {
-                "Could not read file".to_string()
-            };
-
             results.push(SearchResult {
                 file_path: path.clone(),
-                preview_line,
+                preview_line: String::new(),
                 line_number: 1,
                 score: (score * 1000.0) as i64,
+                is_filename_match: false,
             });
         }
-        
-        // Then, add filename search results for files not already found by content search
+
+        // Filename search (also no file I/O here)
         self.add_filename_search_results_fast(&mut results, &mut processed_paths, &query_words);
 
-        // Sort by score (highest first) and limit results
+        // Sort by score and limit to top N
         results.sort_by(|a, b| b.score.cmp(&a.score));
-        results.truncate(20); // Limit to top 20 results
+        results.truncate(20);
+
+        // Fill previews only for the top results (perform file I/O now)
+        self.fill_result_previews(&mut results, query);
+
         results
     }
     
     fn add_filename_search_results_fast(&self, results: &mut Vec<SearchResult>, processed_paths: &mut std::collections::HashSet<PathBuf>, query_words: &[&str]) {
-        // Use cached filenames for fast search
         for (path, filename_lower) in &self.filename_cache {
-            // Skip if already processed by content search
-            if processed_paths.contains(path) {
-                continue;
-            }
-            
+            if processed_paths.contains(path) { continue; }
+
             let mut filename_score = 0;
-            
             for word in query_words {
                 if filename_lower.contains(word) {
-                    // Higher score for exact filename matches
                     filename_score += if filename_lower == *word { 100 } else { 50 };
                 }
             }
-            
+
             if filename_score > 0 {
                 processed_paths.insert(path.clone());
-                
-                // Get preview for filename matches
-                let preview_line = if let Ok(content) = std::fs::read_to_string(path) {
-                    content.lines()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("Empty file")
-                        .trim()
-                        .to_string()
-                } else {
-                    "Could not read file".to_string()
-                };
-                
                 results.push(SearchResult {
                     file_path: path.clone(),
-                    preview_line: format!("[FILENAME MATCH] {}", preview_line),
+                    preview_line: String::new(), // filled later
                     line_number: 1,
                     score: filename_score,
+                    is_filename_match: true,
                 });
             }
+        }
+    }
+
+    /// After sorting/truncation, populate preview lines with minimal I/O
+    fn fill_result_previews(&self, results: &mut [SearchResult], query: &str) {
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().filter(|w| !w.is_empty()).collect();
+        for res in results.iter_mut() {
+            let file = match std::fs::File::open(&res.file_path) {
+                Ok(f) => f,
+                Err(_) => { res.preview_line = "Could not read file".to_string(); continue; }
+            };
+            let reader = BufReader::new(file);
+
+            let mut first_non_empty: Option<String> = None;
+            let mut chosen: Option<String> = None;
+            // Scan at most N lines for performance
+            let mut scanned = 0usize;
+            for line in reader.lines() {
+                scanned += 1;
+                if scanned > 1000 { break; }
+                let Ok(line) = line else { continue };
+                if first_non_empty.is_none() && !line.trim().is_empty() {
+                    first_non_empty = Some(line.trim().to_string());
+                }
+                let ll = line.to_lowercase();
+                if query_words.iter().any(|w| ll.contains(w)) {
+                    chosen = Some(line.trim().to_string());
+                    break;
+                }
+            }
+
+            let line = chosen
+                .or(first_non_empty)
+                .unwrap_or_else(|| "No preview available".to_string());
+
+            res.preview_line = if res.is_filename_match {
+                format!("[FILENAME MATCH] {}", line)
+            } else { line };
         }
     }
 }
@@ -196,6 +197,9 @@ struct App {
     preview_spans: Vec<Line<'static>>,
     /// Last search query to avoid redundant searches
     last_search_query: String,
+    /// Debounce control: last input time and whether a search is pending
+    last_input_time: Option<Instant>,
+    needs_search: bool,
 }
 
 impl App {
@@ -209,19 +213,23 @@ impl App {
             preview_content: "Type to search files...".to_string(),
             preview_spans: vec![Line::from("Type to search files...")],
             last_search_query: String::new(),
+            last_input_time: None,
+            needs_search: false,
         }
     }
 
-    /// Called when the user types a character. Updates the query and search results.
+    /// Called when the user types a character. Updates the query and schedules a debounced search.
     fn on_key(&mut self, c: char) {
         self.query.push(c);
-        self.update_search_results();
+        self.last_input_time = Some(Instant::now());
+        self.needs_search = true;
     }
 
-    /// Called on backspace.
+    /// Called on backspace. Schedules a debounced search.
     fn on_backspace(&mut self) {
         self.query.pop();
-        self.update_search_results();
+        self.last_input_time = Some(Instant::now());
+        self.needs_search = true;
     }
 
     /// Navigates to the next item in the results list.
@@ -258,19 +266,12 @@ impl App {
 
     /// Updates the search results based on the current query.
     fn update_search_results(&mut self) {
-        // Only search if query has actually changed
         if self.query == self.last_search_query {
             return;
         }
-        
         self.last_search_query = self.query.clone();
         self.results = self.index.search(&self.query);
-
-        if !self.results.is_empty() {
-            self.results_state.select(Some(0));
-        } else {
-            self.results_state.select(None);
-        }
+        if !self.results.is_empty() { self.results_state.select(Some(0)); } else { self.results_state.select(None); }
         self.update_preview();
     }
 
@@ -345,7 +346,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
 /// The main application loop.
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
-    let tick_rate = Duration::from_millis(50); // Much faster tick rate for smooth UI
+    let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
 
     loop {
@@ -364,24 +365,24 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                         KeyCode::Backspace => app.on_backspace(),
                         KeyCode::Down => app.next_result(),
                         KeyCode::Up => app.previous_result(),
-                        KeyCode::Enter => {
-                            // Open the file in the default editor
-                            if let Some(selected_index) = app.results_state.selected() {
-                                if let Some(_selected_result) = app.results.get(selected_index) {
-                                    // You could implement file opening here
-                                    // For now, just copy the path to clipboard or show a message
-                                }
-                            }
-                        }
+                        KeyCode::Enter => { /* open file action placeholder */ }
                         _ => {}
                     }
                 }
             }
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
+        // Debounced search trigger
+        if app.needs_search {
+            if let Some(t) = app.last_input_time {
+                if t.elapsed() >= Duration::from_millis(90) { // ~90ms debounce
+                    app.needs_search = false;
+                    app.update_search_results();
+                }
+            }
         }
+
+        if last_tick.elapsed() >= tick_rate { last_tick = Instant::now(); }
     }
 }
 
@@ -459,61 +460,90 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 /// Enhanced preview function that returns both plain text and styled spans for highlighting
 fn get_enhanced_preview_with_styling(file_path: &Path, query: &str) -> Result<(String, Vec<Line<'static>>), Box<dyn Error>> {
-    let content = std::fs::read_to_string(file_path)?;
+    let file = std::fs::File::open(file_path)?;
+    let mut reader = BufReader::new(file);
+
     let query_lower = query.to_lowercase();
-    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-    
+    let query_words: Vec<&str> = query_lower.split_whitespace().filter(|w| !w.is_empty()).collect();
+
     if query.is_empty() {
         return get_simple_preview_with_styling(file_path);
     }
-    
-    let lines: Vec<&str> = content.lines().collect();
-    let mut preview_lines = Vec::new();
-    let mut styled_lines = Vec::new();
-    let mut matching_line_index = None;
-    
-    // Find the first line that contains any query terms
-    for (i, line) in lines.iter().enumerate() {
-        let line_lower = line.to_lowercase();
-        if query_words.iter().any(|word| line_lower.contains(word)) {
-            matching_line_index = Some(i);
+
+    let mut preview_lines: Vec<String> = Vec::new();
+    let mut styled_lines: Vec<Line<'static>> = Vec::new();
+
+    // Keep last 3 lines for context before match
+    let mut prev_lines: VecDeque<(usize, String)> = VecDeque::with_capacity(3);
+    let mut line_num = 0usize;
+    let mut match_found = false;
+
+    // Also collect first 15 lines for fallback
+    let mut first_lines: Vec<String> = Vec::new();
+
+    // Read and search, limit scanning to avoid huge files stalling the UI
+    let mut buf = String::new();
+    while {
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => false,
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    } {
+        line_num += 1;
+        let line = buf.trim_end_matches(['\n', '\r']).to_string();
+        if first_lines.len() < 15 { first_lines.push(format!("    {:3}: {}", line_num, &line)); }
+
+        let ll = line.to_lowercase();
+        if !match_found && query_words.iter().any(|w| ll.contains(w)) {
+            // Emit previous context lines
+            for (n, pline) in prev_lines.iter() {
+                let plain = format!("    {:3}: {}", n, pline);
+                preview_lines.push(plain.clone());
+                styled_lines.push(Line::from(format!("    {:3}: {}", n, pline)));
+            }
+            // Emit the matching line with highlight
+            let prefix = format!(">>> {:3}: ", line_num);
+            preview_lines.push(format!("{}{}", &prefix, &line));
+            styled_lines.push(create_highlighted_line(&line, &query_words, &prefix));
+
+            // Emit up to 10 lines after match
+            for i in 0..10 {
+                buf.clear();
+                match reader.read_line(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let next_line = buf.trim_end_matches(['\n','\r']).to_string();
+                        let ln = line_num + i + 1;
+                        let plain = format!("    {:3}: {}", ln, &next_line);
+                        preview_lines.push(plain.clone());
+                        styled_lines.push(Line::from(plain));
+                    }
+                }
+            }
+
+            match_found = true;
             break;
         }
+
+        // Maintain rolling prev context
+        if prev_lines.len() == 3 { prev_lines.pop_front(); }
+        prev_lines.push_back((line_num, line));
+
+        // Safety: hard limit on lines scanned
+        if line_num >= 5000 { break; }
     }
-    
-    if let Some(match_idx) = matching_line_index {
-        // Show context around the matching line
-        let start = match_idx.saturating_sub(3);
-        let end = std::cmp::min(match_idx + 10, lines.len());
-        
-        for (i, line) in lines[start..end].iter().enumerate() {
-            let actual_line_num = start + i + 1;
-            let line_marker = if start + i == match_idx {
-                ">>> " // Mark the matching line
-            } else {
-                "    "
-            };
-            
-            let plain_line = format!("{}{:3}: {}", line_marker, actual_line_num, line);
-            preview_lines.push(plain_line);
-            
-            // Create styled line with highlighting
-            if start + i == match_idx {
-                let styled_line = create_highlighted_line(line, &query_words, &format!("{}{:3}: ", line_marker, actual_line_num));
-                styled_lines.push(styled_line);
-            } else {
-                styled_lines.push(Line::from(format!("{}{:3}: {}", line_marker, actual_line_num, line)));
-            }
+
+    if !match_found {
+        // Fallback to first 15 lines
+        if first_lines.is_empty() {
+            first_lines.push("(empty file)".to_string());
         }
-    } else {
-        // No specific line match, show first 15 lines
-        for (i, line) in lines.iter().take(15).enumerate() {
-            let plain_line = format!("    {:3}: {}", i + 1, line);
-            preview_lines.push(plain_line.clone());
-            styled_lines.push(Line::from(plain_line));
-        }
+        let styled: Vec<Line<'static>> = first_lines.iter().map(|l| Line::from(l.clone())).collect();
+        return Ok((first_lines.join("\n"), styled));
     }
-    
+
     Ok((preview_lines.join("\n"), styled_lines))
 }
 
@@ -572,11 +602,14 @@ fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Li
 
 /// Simple preview function with styling that reads the first few lines of a file
 fn get_simple_preview_with_styling(file_path: &Path) -> Result<(String, Vec<Line<'static>>), Box<dyn Error>> {
-    let content = std::fs::read_to_string(file_path)?;
-    let lines: Vec<&str> = content.lines().take(20).collect();
-    let plain_text = lines.join("\n");
-    let styled_lines = lines.iter().enumerate().map(|(i, line)| {
-        Line::from(format!("{:3}: {}", i + 1, line))
-    }).collect();
-    Ok((plain_text, styled_lines))
+    let file = std::fs::File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        if i >= 20 { break; }
+        let line = line.unwrap_or_default();
+        lines.push(format!("{:3}: {}", i + 1, line));
+    }
+    let styled_lines = lines.iter().map(|l| Line::from(l.clone())).collect();
+    Ok((lines.join("\n"), styled_lines))
 }
