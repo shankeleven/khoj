@@ -91,11 +91,6 @@ impl Index {
         
         // First, add content search results
         for (path, score) in content_search_results.iter() {
-            // Only include results with a meaningful score (filter out very low relevance)
-            if *score < 0.001 {
-                continue;
-            }
-            
             processed_paths.insert(path.clone());
             
             // Get a preview line from the file content
@@ -110,15 +105,6 @@ impl Index {
                     if query_words.iter().any(|word| line_lower.contains(word)) {
                         found_line = Some(line.trim().to_string());
                         break;
-                    }
-                }
-                
-                // If no line contains the query directly, check if the file actually matches
-                if found_line.is_none() {
-                    let content_lower = content.to_lowercase();
-                    if !query_words.iter().any(|word| content_lower.contains(word)) {
-                        // Skip this file if it doesn't actually contain the search terms
-                        continue;
                     }
                 }
                 
