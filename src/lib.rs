@@ -10,7 +10,7 @@ use std::io::{BufReader, BufWriter};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-mod model;
+pub mod model;
 use model::*;
 mod server;
 mod lexer;
@@ -73,22 +73,17 @@ fn parse_entire_xml_file(file_path: &Path) -> Result<String, ()> {
     Ok(content)
 }
 
-fn parse_entire_file_by_extension(file_path: &Path) -> Result<String, ()> {
-    let extension = file_path.extension().ok_or_else(|| {
-        eprintln!("ERROR: can't detect file type of {file_path} without extension",
-                  file_path = file_path.display());
-    })?.to_string_lossy();
+pub fn parse_entire_file_by_extension(file_path: &Path) -> Result<String, ()> {
+    let extension = match file_path.extension() {
+        Some(ext) => ext.to_string_lossy(),
+        None => return Err(()),
+    };
     match extension.as_ref() {
         "xhtml" | "xml" => parse_entire_xml_file(file_path),
         // TODO: specialized parser for markdown files
         "txt" | "md" => parse_entire_txt_file(file_path),
         "pdf" => parse_entire_pdf_file(file_path),
-        _ => {
-            eprintln!("ERROR: can't detect file type of {file_path}: unsupported extension {extension}",
-                      file_path = file_path.display(),
-                      extension = extension);
-            Err(())
-        }
+        _ => Err(()),
     }
 }
 
@@ -149,21 +144,11 @@ pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed:
             continue 'next_file;
         }
 
-        let extension = match file_path.extension() {
-            Some(ext) => ext.to_str().unwrap_or(""),
-            None => continue 'next_file,
-        };
-
-        match extension {
-            "txt" | "md" | "xml" | "xhtml" | "pdf" => {}
-            _ => continue 'next_file,
-        }
-
         // TODO: how does this work with symlinks?
 
         let mut model = model.lock().unwrap();
         if model.requires_reindexing(&file_path, last_modified) {
-            println!("Indexing {:?}...", &file_path);
+            
 
             let content = match parse_entire_file_by_extension(&file_path) {
                 Ok(content) => content.chars().collect::<Vec<_>>(),
@@ -185,7 +170,7 @@ fn usage(program: &str) {
     eprintln!("    serve <folder> [address]       start local HTTP server with Web Interface");
 }
 
-fn entry() -> Result<(), ()> {
+pub fn entry() -> Result<(), ()> {
     let mut args = env::args();
     let program = args.next().expect("path to program is provided");
 
@@ -251,10 +236,11 @@ fn entry() -> Result<(), ()> {
     }
 }
 
-mod tui;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tui::main()
+fn main() -> ExitCode {
+    match entry() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(()) => ExitCode::FAILURE,
+    }
 }
 
 // TODO: search result must consist of clickable links
