@@ -7,6 +7,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -127,6 +128,8 @@ struct App {
     results_state: ListState,
     /// The content for the file preview pane.
     preview_content: String,
+    /// Styled preview content for highlighting
+    preview_spans: Vec<Line<'static>>,
 }
 
 impl App {
@@ -138,6 +141,7 @@ impl App {
             index,
             results_state: ListState::default(),
             preview_content: "Type to search files...".to_string(),
+            preview_spans: vec![Line::from("Type to search files...")],
         }
     }
 
@@ -201,12 +205,15 @@ impl App {
     fn update_preview(&mut self) {
         if let Some(selected_index) = self.results_state.selected() {
             if let Some(selected_result) = self.results.get(selected_index) {
-                // Simple file preview
-                self.preview_content = get_simple_preview(&selected_result.file_path)
-                    .unwrap_or_else(|e| format!("Error reading file: {}", e));
+                // Enhanced file preview with highlighting
+                let (content, spans) = get_enhanced_preview_with_styling(&selected_result.file_path, &self.query)
+                    .unwrap_or_else(|e| (format!("Error reading file: {}", e), vec![Line::from("Error reading file")]));
+                self.preview_content = content;
+                self.preview_spans = spans;
             }
         } else {
             self.preview_content = "Type to search files...".to_string();
+            self.preview_spans = vec![Line::from("Type to search files...")];
         }
     }
 }
@@ -365,7 +372,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(results_list, content_chunks[0], &mut app.results_state);
 
     // Preview pane
-    let preview = Paragraph::new(app.preview_content.as_str())
+    let preview = Paragraph::new(app.preview_spans.clone())
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::ALL).title("Preview"));
     f.render_widget(preview, content_chunks[1]);
@@ -374,9 +381,126 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 // --- Helper Functions ---
 
-/// Simple preview function that reads the first few lines of a file
-fn get_simple_preview(file_path: &Path) -> Result<String, Box<dyn Error>> {
+/// Enhanced preview function that returns both plain text and styled spans for highlighting
+fn get_enhanced_preview_with_styling(file_path: &Path, query: &str) -> Result<(String, Vec<Line<'static>>), Box<dyn Error>> {
+    let content = std::fs::read_to_string(file_path)?;
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+    
+    if query.is_empty() {
+        return get_simple_preview_with_styling(file_path);
+    }
+    
+    let lines: Vec<&str> = content.lines().collect();
+    let mut preview_lines = Vec::new();
+    let mut styled_lines = Vec::new();
+    let mut matching_line_index = None;
+    
+    // Find the first line that contains any query terms
+    for (i, line) in lines.iter().enumerate() {
+        let line_lower = line.to_lowercase();
+        if query_words.iter().any(|word| line_lower.contains(word)) {
+            matching_line_index = Some(i);
+            break;
+        }
+    }
+    
+    if let Some(match_idx) = matching_line_index {
+        // Show context around the matching line
+        let start = match_idx.saturating_sub(3);
+        let end = std::cmp::min(match_idx + 10, lines.len());
+        
+        for (i, line) in lines[start..end].iter().enumerate() {
+            let actual_line_num = start + i + 1;
+            let line_marker = if start + i == match_idx {
+                ">>> " // Mark the matching line
+            } else {
+                "    "
+            };
+            
+            let plain_line = format!("{}{:3}: {}", line_marker, actual_line_num, line);
+            preview_lines.push(plain_line);
+            
+            // Create styled line with highlighting
+            if start + i == match_idx {
+                let styled_line = create_highlighted_line(line, &query_words, &format!("{}{:3}: ", line_marker, actual_line_num));
+                styled_lines.push(styled_line);
+            } else {
+                styled_lines.push(Line::from(format!("{}{:3}: {}", line_marker, actual_line_num, line)));
+            }
+        }
+    } else {
+        // No specific line match, show first 15 lines
+        for (i, line) in lines.iter().take(15).enumerate() {
+            let plain_line = format!("    {:3}: {}", i + 1, line);
+            preview_lines.push(plain_line.clone());
+            styled_lines.push(Line::from(plain_line));
+        }
+    }
+    
+    Ok((preview_lines.join("\n"), styled_lines))
+}
+
+/// Create a highlighted line with colored spans
+fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Line<'static> {
+    let mut spans = vec![Span::raw(prefix.to_string())];
+    let mut remaining = line.to_string();
+    
+    // Process the line to find and highlight matches
+    while !remaining.is_empty() {
+        let mut found_match = false;
+        let mut earliest_pos = remaining.len();
+        let mut match_len = 0;
+        
+        // Find the earliest match in the remaining text
+        for word in query_words {
+            if !word.is_empty() && word.len() > 1 {
+                let remaining_lower = remaining.to_lowercase();
+                let word_lower = word.to_lowercase();
+                
+                if let Some(pos) = remaining_lower.find(&word_lower) {
+                    if pos < earliest_pos {
+                        earliest_pos = pos;
+                        match_len = word.len();
+                        found_match = true;
+                    }
+                }
+            }
+        }
+        
+        if found_match {
+            // Add text before the match
+            if earliest_pos > 0 {
+                let before = &remaining[..earliest_pos];
+                spans.push(Span::raw(before.to_string()));
+            }
+            
+            // Add the highlighted match
+            let matched_text = &remaining[earliest_pos..earliest_pos + match_len];
+            spans.push(Span::styled(
+                matched_text.to_string(),
+                Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)
+            ));
+            
+            // Update remaining text
+            remaining = remaining[earliest_pos + match_len..].to_string();
+        } else {
+            // No more matches, add the rest of the text
+            spans.push(Span::raw(remaining.clone()));
+            break;
+        }
+    }
+    
+    Line::from(spans)
+}
+
+/// Simple preview function with styling that reads the first few lines of a file
+fn get_simple_preview_with_styling(file_path: &Path) -> Result<(String, Vec<Line<'static>>), Box<dyn Error>> {
     let content = std::fs::read_to_string(file_path)?;
     let lines: Vec<&str> = content.lines().take(20).collect();
-    Ok(lines.join("\n"))
+    let plain_text = lines.join("\n");
+    let styled_lines = lines.iter().enumerate().map(|(i, line)| {
+        Line::from(format!("{:3}: {}", i + 1, line))
+    }).collect();
+    Ok((plain_text, styled_lines))
 }
