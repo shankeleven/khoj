@@ -6,7 +6,7 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
@@ -25,6 +25,7 @@ use std::{
 
 use crate::model::{Model};
 use crate::add_folder_to_model;
+use crate::theme::Theme;
 
 const PREVIEW_FILL_LIMIT: usize = 100; // number of results to prefill preview for
 
@@ -415,80 +416,72 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
 
 /// Renders the user interface.
 fn ui(f: &mut Frame, app: &mut App) {
-    // Main layout: search bar and content
-    let chunks = Layout::default()
+    let theme = Theme::default();
+    let size = f.size();
+    // Paint background
+    let bg_block = Block::default().style(Style::default().bg(theme.background));
+    f.render_widget(bg_block, size);
+
+    let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Search bar
-            Constraint::Min(0)     // Content
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
-        .split(f.size());
+        .split(size);
+
+    // Header
+    let header = Paragraph::new("  Khoj • ↑↓ navigate • Enter open • Esc quit")
+        .style(Style::default().fg(theme.foreground).bg(theme.highlight_bg).add_modifier(Modifier::BOLD));
+    f.render_widget(header, layout[0]);
 
     // Search bar
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Span::styled("Search", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD))); // BorderType removed to simplify
     let input = Paragraph::new(app.query.as_str())
-        .style(Style::default().fg(Color::Yellow))
-        .block(Block::default().borders(Borders::ALL).title("Search"));
-    f.render_widget(input, chunks[0]);
-    // Make the cursor visible
-    f.set_cursor(chunks[0].x + app.query.len() as u16 + 1, chunks[0].y + 1);
+        .style(Style::default().fg(theme.accent))
+        .block(search_block);
+    f.render_widget(input, layout[1]);
+    f.set_cursor(layout[1].x + app.query.len() as u16 + 1, layout[1].y + 1);
 
-    // Content layout: two vertical panes for results and preview.
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
-        .split(chunks[1]);
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)].as_ref())
+        .split(layout[2]);
 
-    // Results pane
-    let results_items: Vec<ListItem> = app
-        .results
-        .iter()
-        .map(|res| {
-            let file_name = res.file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown");
-            let dir_path = res.file_path
-                .parent()
-                .and_then(|p| p.to_str())
-                .unwrap_or("");
+    // Prepare query words
+    let lowered_query = app.query.to_lowercase();
+    let q_words: Vec<&str> = lowered_query.split_whitespace().filter(|w| !w.is_empty()).collect();
 
-            // Show filename, path, and preview of the matching content
-            let preview = if res.preview_line.len() > 50 {
-                format!("{}...", &res.preview_line[..47])
-            } else {
-                res.preview_line.clone()
-            };
+    // Results items with theme
+    let results_items: Vec<ListItem> = app.results.iter().map(|res| {
+        let file_name = res.file_path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+        let dir_path = res.file_path.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let trimmed_preview = if res.preview_line.is_empty() {"(preview on select)".to_string()} else if res.preview_line.len()>80 {format!("{}…", &res.preview_line[..77])} else {res.preview_line.clone()};
+        let filename_line = create_highlighted_line(file_name, &q_words, "");
+        let preview_line = create_highlighted_line(&trimmed_preview, &q_words, "  → ");
+        let path_line = Line::from(vec![Span::styled("  ", Style::default()), Span::styled(dir_path.to_string(), Style::default().fg(theme.secondary))]);
+        ListItem::new(vec![filename_line, path_line, preview_line]).style(Style::default().fg(theme.foreground))
+    }).collect();
 
-            // Trim preview for list, but keep it decent length (and show placeholder if empty)
-            let trimmed_preview = if res.preview_line.is_empty() {
-                "(preview on select)".to_string()
-            } else if res.preview_line.len() > 80 {
-                format!("{}…", &res.preview_line[..77])
-            } else {
-                res.preview_line.clone()
-            };
-
-            ListItem::new(format!("{}\n  {}\n  → {}", file_name, dir_path, trimmed_preview))
-                .style(Style::default().fg(Color::White))
-        })
-        .collect();
-
+    let results_title = format!("Results ({})", app.results.len());
     let results_list = List::new(results_items)
-        .block(Block::default().borders(Borders::ALL).title("Results"))
-        .highlight_style(
-            Style::default()
-                .bg(Color::LightGreen)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)).title(Span::styled(results_title, Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD))))
+        .highlight_style(Style::default().bg(theme.highlight_bg).fg(theme.highlight_fg).add_modifier(Modifier::BOLD))
+        .highlight_symbol("› ");
     f.render_stateful_widget(results_list, content_chunks[0], &mut app.results_state);
 
-    // Preview pane
-    let preview = Paragraph::new(app.preview_spans.clone())
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title("Preview"));
+    let preview_block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)).title(Span::styled("Preview", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)));
+    let preview = Paragraph::new(app.preview_spans.clone()).wrap(Wrap { trim: true }).block(preview_block).style(Style::default().fg(theme.foreground));
     f.render_widget(preview, content_chunks[1]);
+
+    let footer_text = format!("  Query len: {}  •  Results: {}  ", app.query.chars().count(), app.results.len());
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(theme.foreground).bg(theme.highlight_bg));
+    f.render_widget(footer, layout[3]);
 }
 
 
@@ -585,54 +578,18 @@ fn get_enhanced_preview_with_styling(file_path: &Path, query: &str) -> Result<(S
 
 /// Create a highlighted line with colored spans
 fn create_highlighted_line(line: &str, query_words: &[&str], prefix: &str) -> Line<'static> {
-    let mut spans = vec![Span::raw(prefix.to_string())];
+    let theme = Theme::default();
+    let mut spans = vec![Span::styled(prefix.to_string(), Style::default().fg(theme.secondary))];
     let mut remaining = line.to_string();
-
-    // Process the line to find and highlight matches
     while !remaining.is_empty() {
-        let mut found_match = false;
-        let mut earliest_pos = remaining.len();
-        let mut match_len = 0;
-
-        // Find the earliest match in the remaining text
-        for word in query_words {
-            if !word.is_empty() && word.len() > 1 {
-                let remaining_lower = remaining.to_lowercase();
-                let word_lower = word.to_lowercase();
-
-                if let Some(pos) = remaining_lower.find(&word_lower) {
-                    if pos < earliest_pos {
-                        earliest_pos = pos;
-                        match_len = word.len();
-                        found_match = true;
-                    }
-                }
-            }
-        }
-
-        if found_match {
-            // Add text before the match
-            if earliest_pos > 0 {
-                let before = &remaining[..earliest_pos];
-                spans.push(Span::raw(before.to_string()));
-            }
-
-            // Add the highlighted match
-            let matched_text = &remaining[earliest_pos..earliest_pos + match_len];
-            spans.push(Span::styled(
-                matched_text.to_string(),
-                Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)
-            ));
-
-            // Update remaining text
-            remaining = remaining[earliest_pos + match_len..].to_string();
-        } else {
-            // No more matches, add the rest of the text
-            spans.push(Span::raw(remaining.clone()));
-            break;
-        }
+        let mut found_match = false; let mut earliest_pos = remaining.len(); let mut match_len = 0;
+        for word in query_words { if !word.is_empty() && word.len()>1 { let rem_lower = remaining.to_lowercase(); let w_lower = word.to_lowercase(); if let Some(pos)=rem_lower.find(&w_lower) { if pos < earliest_pos { earliest_pos = pos; match_len = word.len(); found_match=true; } } } }
+        if found_match { if earliest_pos>0 { spans.push(Span::raw(remaining[..earliest_pos].to_string())); }
+            let matched_text = &remaining[earliest_pos..earliest_pos+match_len];
+            spans.push(Span::styled(matched_text.to_string(), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
+            remaining = remaining[earliest_pos+match_len..].to_string();
+        } else { spans.push(Span::raw(remaining.clone())); break; }
     }
-
     Line::from(spans)
 }
 
