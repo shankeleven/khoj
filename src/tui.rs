@@ -22,6 +22,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use std::process::{Command, Stdio};
 
 use crate::model::{Model};
 use crate::add_folder_to_model;
@@ -364,8 +365,13 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("Error: {:?}", err);
+    match res {
+        Ok(RunOutcome::Quit) => {}
+        Ok(RunOutcome::Open(path)) => {
+            // After clean terminal restore, open editor then exit.
+            open_file_external(&path);
+        }
+        Err(err) => println!("Error: {:?}", err),
     }
 
     Ok(())
@@ -373,7 +379,9 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
 
 /// The main application loop.
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+enum RunOutcome { Quit, Open(PathBuf) }
+
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<RunOutcome> {
     let tick_rate = Duration::from_millis(50);
     let mut last_tick = Instant::now();
 
@@ -388,12 +396,18 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Esc => return Ok(RunOutcome::Quit),
                         KeyCode::Char(c) => app.on_key(c),
                         KeyCode::Backspace => app.on_backspace(),
                         KeyCode::Down => app.next_result(),
                         KeyCode::Up => app.previous_result(),
-                        KeyCode::Enter => { /* open file action placeholder */ }
+                        KeyCode::Enter => {
+                            if let Some(sel) = app.results_state.selected() {
+                                if let Some(res) = app.results.get(sel) {
+                                    return Ok(RunOutcome::Open(res.file_path.clone()));
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -605,4 +619,58 @@ fn get_simple_preview_with_styling(file_path: &Path) -> Result<(String, Vec<Line
     }
     let styled_lines: Vec<Line<'static>> = lines.iter().map(|l| Line::from(l.clone())).collect();
     Ok((lines.join("\n"), styled_lines))
+}
+
+/// Temporarily leave the TUI to open the selected file in an external editor, then return.
+/// Launch external editor after program exit (terminal already restored by main).
+fn open_file_external(path: &Path) {
+    // Best-effort ensure terminal is in normal mode
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, DisableMouseCapture);
+    // Launch editor
+    let (program, mut args) = select_editor();
+    args.push(path.to_string_lossy().to_string());
+    // For GUI editors (code/code-insiders) launch detached (non-blocking). For terminal editors, block.
+    if program == "code" || program == "code-insiders" {
+    if let Ok(child) = Command::new(&program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn() {
+            // Immediately detach
+            let _ = child.id();
+        }
+    } else {
+        let _ = Command::new(&program).args(&args).status();
+    }
+    // After editor returns, re-assert sane terminal (raw already disabled). Leave screen as-is.
+    let _ = disable_raw_mode();
+    let mut stdout2 = io::stdout();
+    let _ = execute!(stdout2, DisableMouseCapture);
+    // Print a newline to ensure shell prompt appears cleanly
+    println!("");
+}
+
+fn select_editor() -> (String, Vec<String>) {
+    // Helper to find a binary in PATH
+    fn in_path(bin: &str) -> bool {
+        if let Ok(path_var) = env::var("PATH") {
+            for p in env::split_paths(&path_var) {
+                let candidate = p.join(bin);
+                if candidate.is_file() { return true; }
+            }
+        }
+        false
+    }
+
+    for candidate in ["code", "code-insiders"].iter() {
+        if in_path(candidate) { return ((**candidate).to_string(), vec![]); }
+    }
+
+    if let Ok(ed) = env::var("KHOJ_EDITOR") { return (ed, vec![]); }
+    if let Ok(ed) = env::var("EDITOR") { return (ed, vec![]); }
+    if in_path("nano") { return ("nano".to_string(), vec![]); }
+    ("vi".to_string(), vec![])
 }
