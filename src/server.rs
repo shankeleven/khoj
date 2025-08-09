@@ -18,12 +18,6 @@ fn serve_400(request: Request, message: &str) -> io::Result<()> {
     request.respond(Response::from_string(format!("400: {message}")).with_status_code(StatusCode(400)))
 }
 
-fn serve_bytes(request: Request, bytes: &[u8], content_type: &str) -> io::Result<()> {
-    let content_type_header = Header::from_bytes("Content-Type", content_type)
-        .expect("That we didn't put any garbage in the headers");
-    request.respond(Response::from_data(bytes).with_header(content_type_header))
-}
-
 // TODO: the errors of serve_api_search should probably return JSON
 // 'Cause that's what expected from them.
 fn serve_api_search(model: Arc<Mutex<Model>>, mut request: Request) -> io::Result<()> {
@@ -95,12 +89,6 @@ fn serve_request(model: Arc<Mutex<Model>>, request: Request) -> io::Result<()> {
         }
         (Method::Get, "/api/stats") => {
             serve_api_stats(model, request)
-        }
-        (Method::Get, "/index.js") => {
-            serve_bytes(request, include_bytes!("index.js"), "text/javascript; charset=utf-8")
-        }
-        (Method::Get, "/") | (Method::Get, "/index.html") => {
-            serve_bytes(request, include_bytes!("index.html"), "text/html; charset=utf-8")
         }
         _ => {
             serve_404(request)

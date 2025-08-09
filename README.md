@@ -7,6 +7,6 @@ and is not optimized for large files.
 ## Quick Start
 
 ```console
-$ cargo run serve ./folder/
-now go checkout 'http://localhost:6969/'
+$ cargo run or cargo build # to build the project and use the prebuilt index
+$ cargo run -- refresh or cargo build -- refresh # to refresh the index
 ```

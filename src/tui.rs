@@ -26,6 +26,8 @@ use std::{
 use crate::model::{Model};
 use crate::add_folder_to_model;
 
+const PREVIEW_FILL_LIMIT: usize = 100; // number of results to prefill preview for
+
 /// Represents a single search result.
 #[derive(Debug, Clone)]
 struct SearchResult {
@@ -81,9 +83,7 @@ impl Index {
     }
 
     fn search(&self, query: &str) -> Vec<SearchResult> {
-        if query.is_empty() || query.len() < 2 {
-            return Vec::new();
-        }
+        if query.is_empty() || query.len() < 2 { return Vec::new(); }
 
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -108,13 +108,11 @@ impl Index {
         // Filename search (also no file I/O here)
         self.add_filename_search_results_fast(&mut results, &mut processed_paths, &query_words);
 
-        // Sort by score and limit to top N
+        // Sort by score (highest first). Do NOT truncate; keep all results.
         results.sort_by(|a, b| b.score.cmp(&a.score));
-        results.truncate(20);
 
         // Fill previews only for the top results (perform file I/O now)
         self.fill_result_previews(&mut results, query);
-
         results
     }
 
@@ -142,11 +140,11 @@ impl Index {
         }
     }
 
-    /// After sorting/truncation, populate preview lines with minimal I/O
+    /// After sorting, populate preview lines with minimal I/O for only the first PREVIEW_FILL_LIMIT results
     fn fill_result_previews(&self, results: &mut [SearchResult], query: &str) {
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().filter(|w| !w.is_empty()).collect();
-        for res in results.iter_mut() {
+        for res in results.iter_mut().take(PREVIEW_FILL_LIMIT) {
             let file = match std::fs::File::open(&res.file_path) {
                 Ok(f) => f,
                 Err(_) => { res.preview_line = "Could not read file".to_string(); continue; }
@@ -461,7 +459,16 @@ fn ui(f: &mut Frame, app: &mut App) {
                 res.preview_line.clone()
             };
 
-            ListItem::new(format!("{}\n  {}\n  → {}", file_name, dir_path, preview))
+            // Trim preview for list, but keep it decent length (and show placeholder if empty)
+            let trimmed_preview = if res.preview_line.is_empty() {
+                "(preview on select)".to_string()
+            } else if res.preview_line.len() > 80 {
+                format!("{}…", &res.preview_line[..77])
+            } else {
+                res.preview_line.clone()
+            };
+
+            ListItem::new(format!("{}\n  {}\n  → {}", file_name, dir_path, trimmed_preview))
                 .style(Style::default().fg(Color::White))
         })
         .collect();
