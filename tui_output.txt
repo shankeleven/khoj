@@ -1,0 +1,15 @@
+Starting improved TUI search engine...
+Features:
+- Instant startup (no blocking indexing)
+- Background indexing with progress
+- Smooth search with debouncing (150ms)
+- Fast file preview with caching
+- Responsive UI (50ms tick rate)
+
+Controls:
+- Type to search files
+- Up/Down arrows to navigate
+- Enter to select (placeholder)
+- Esc to quit
+
+Starting TUI...

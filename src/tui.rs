@@ -35,8 +35,6 @@ struct SearchResult {
     file_path: PathBuf,
     /// A snippet from the file where the match was found.
     preview_line: String,
-    /// The line number of the preview.
-    line_number: usize,
     /// Score from the fuzzy matcher.
     score: i64,
     /// Whether this result came from a filename match (not content)
@@ -99,7 +97,6 @@ impl Index {
             results.push(SearchResult {
                 file_path: path.clone(),
                 preview_line: String::new(),
-                line_number: 1,
                 score: (score * 1000.0) as i64,
                 is_filename_match: false,
             });
@@ -132,7 +129,6 @@ impl Index {
                 results.push(SearchResult {
                     file_path: path.clone(),
                     preview_line: String::new(), // filled later
-                    line_number: 1,
                     score: filename_score,
                     is_filename_match: true,
                 });
@@ -295,7 +291,11 @@ impl App {
 pub fn main() -> Result<(), Box<dyn Error>> {
     // Parse CLI args for --refresh
     let args: Vec<String> = env::args().collect();
-    let refresh = args.iter().any(|a| a == "refresh");
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        eprintln!("Usage: khoj [--refresh|-r]\n  --refresh  Rebuild index even if .finder.json exists");
+        return Ok(());
+    }
+    let refresh = args.iter().any(|a| a == "--refresh" || a == "-r");
 
     // Determine working directory and index path
     let current_dir = env::current_dir()?;
@@ -646,6 +646,6 @@ fn get_simple_preview_with_styling(file_path: &Path) -> Result<(String, Vec<Line
         let line = line.unwrap_or_default();
         lines.push(format!("{:3}: {}", i + 1, line));
     }
-    let styled_lines = lines.iter().map(|l| Line::from(l.clone())).collect();
+    let styled_lines: Vec<Line<'static>> = lines.iter().map(|l| Line::from(l.clone())).collect();
     Ok((lines.join("\n"), styled_lines))
 }

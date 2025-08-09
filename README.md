@@ -10,3 +10,13 @@ and is not optimized for large files.
 $ cargo run or cargo build # to build the project and use the prebuilt index
 $ cargo run -- refresh or cargo build -- refresh # to refresh the index
 ```
+
+## Features
+- Content search using TF-IDF
+- Preview with highlighted terms
+- Smooth user interface
+
+## Testing
+We can search for words like "search", "preview", or "TUI" to see if highlighting works correctly.
+
+The system should find these keywords and show them with → ← markers around the matching terms.
