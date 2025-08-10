@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{PathBuf, Path};
 use serde::{Deserialize, Serialize};
 use super::lexer::Lexer;
@@ -18,6 +18,8 @@ pub struct Doc {
     count: usize,
     tf: TermFreq,
     last_modified: SystemTime,
+    #[serde(default)]
+    positions: HashMap<String, Vec<usize>>, // token -> positions in sequence
 }
 
 impl Model {
@@ -41,10 +43,33 @@ impl Model {
     pub fn search_query(&self, query: &[char]) -> Vec<(PathBuf, f32)> {
         let mut result = Vec::new();
         let tokens = Lexer::new(&query).collect::<Vec<_>>();
+        // Distinct token set for multi-term coverage boost
+        let distinct: HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
+        let distinct_len = distinct.len().max(1) as f32;
         for (path, doc) in &self.docs {
             let mut rank = 0f32;
             for token in &tokens {
                 rank += compute_tf(token, doc) * compute_idf(&token, self.docs.len(), &self.df);
+            }
+            if distinct.len() > 1 {
+                // Count how many distinct query tokens are present in this doc
+                let present = distinct.iter().filter(|t| doc.tf.contains_key(**t)).count() as f32;
+                let coverage = present / distinct_len; // 0..1
+                // New scheme: strong penalty for partial coverage, bonus for full coverage
+                const FULL_COVER_BONUS: f32 = 0.5; // extra 50% if all terms present
+                const PARTIAL_EXP: f32 = 2.0; // coverage exponent for partial docs
+                let coverage_factor = if coverage >= 1.0 {
+                    1.0 + FULL_COVER_BONUS
+                } else {
+                    // (coverage^exp) shrinks rank for missing terms; ensures multi-term intent respected
+                    coverage.powf(PARTIAL_EXP)
+                };
+                rank *= coverage_factor;
+            }
+            // Phrase boost: if full ordered sequence of tokens appears contiguously
+            if tokens.len() > 1 && phrase_in_doc(&tokens, doc) {
+                const PHRASE_BOOST: f32 = 2.0; // multiplicative boost for exact phrase
+                rank *= PHRASE_BOOST;
             }
             // TODO: investigate the sources of NaN
             if !rank.is_nan() {
@@ -62,12 +87,14 @@ impl Model {
         let mut tf = TermFreq::new();
 
         let mut count = 0;
-        for t in Lexer::new(content) {
+        let mut positions: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, t) in Lexer::new(content).enumerate() {
             if let Some(f) = tf.get_mut(&t) {
                 *f += 1;
             } else {
-                tf.insert(t, 1);
+                tf.insert(t.clone(), 1);
             }
+            positions.entry(t).or_default().push(idx);
             count += 1;
         }
 
@@ -79,7 +106,7 @@ impl Model {
             }
         }
 
-        self.docs.insert(file_path, Doc {count, tf, last_modified});
+    self.docs.insert(file_path, Doc {count, tf, last_modified, positions});
     }
 }
 
@@ -93,4 +120,28 @@ fn compute_idf(t: &str, n: usize, df: &DocFreq) -> f32 {
     let n = n as f32;
     let m = df.get(t).cloned().unwrap_or(1) as f32;
     (n / m).log10()
+}
+
+fn phrase_in_doc(tokens: &[String], doc: &Doc) -> bool {
+    if tokens.is_empty() { return false; }
+    // Quick reject if any token missing
+    for t in tokens { if !doc.tf.contains_key(t) { return false; } }
+    // Get candidate starting positions for first token
+    if let Some(first_pos) = doc.positions.get(&tokens[0]) {
+        // For each start, test consecutive positions
+        'outer: for &start in first_pos {
+            let mut expected = start + 1;
+            for tok in &tokens[1..] {
+                match doc.positions.get(tok) {
+                    Some(pos_vec) => {
+                        if !pos_vec.binary_search(&expected).is_ok() { continue 'outer; }
+                        expected += 1;
+                    }
+                    None => continue 'outer,
+                }
+            }
+            return true; // all matched consecutively
+        }
+    }
+    false
 }
