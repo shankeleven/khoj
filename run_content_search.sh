@@ -24,4 +24,4 @@ echo ""
 echo "🚀 Starting TUI..."
 echo ""
 
-./target/debug/seroost
+./target/debug/khoj

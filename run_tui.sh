@@ -17,4 +17,4 @@ echo ""
 echo "Starting TUI..."
 sleep 2
 
-./target/debug/seroost
+./target/debug/khoj
