@@ -15,6 +15,7 @@ $ cargo run -- refresh or cargo build -- refresh # to refresh the index
 
 
 ## Benchmarks
+These are the benchmarks on my ryzen 7 5700
 ```console
 === Indexing Benchmark ===
 Indexed 859 files in 3.54s
@@ -56,5 +57,21 @@ Throughput: 518.58 QPS
 | Option | Description |
 |---------|-------------|
 | `--refresh`, `-r` | Rebuilds the index and ignores any existing `.finder.json`. |
+
+
+
+### Editor Selection
+
+When opening a file, Khoj checks editors in the following order:
+1. `code` or `code-insiders`
+2. `KHOJ_EDITOR`
+3. `EDITOR`
+4. `nano`
+5. `vi`
+
+To force a specific editor:
+```console
+export KHOJ_EDITOR=nvim
+```
 
 
