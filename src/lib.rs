@@ -116,24 +116,24 @@ fn save_model_as_json(model: &Model, index_path: &Path) -> Result<(), ()> {
     Ok(())
 }
 
+use walkdir::WalkDir;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed: &mut usize) -> Result<(), ()> {
-    let dir = fs::read_dir(dir_path).map_err(|err| {
-        eprintln!("ERROR: could not open directory {dir_path} for indexing: {err}",
-                  dir_path = dir_path.display());
-    })?;
+    let files: Vec<_> = WalkDir::new(dir_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_owned())
+        .collect();
 
-    'next_file: for file in dir {
-        let file = file.map_err(|err| {
-            eprintln!("ERROR: could not read next file in directory {dir_path} during indexing: {err}",
-                      dir_path = dir_path.display());
-        })?;
+    let processed_count = AtomicUsize::new(0);
 
-        let file_path = file.path();
-
-        // Skip if matched by .khojignore
-        let is_dir_hint = file_path.is_dir();
-        if ignore_rules::is_ignored(&file_path, is_dir_hint) {
-            continue 'next_file;
+    files.par_iter().for_each(|file_path| {
+        // Skip if matched by .khojignore (checked inside is_ignored)
+        if ignore_rules::is_ignored(file_path, false) {
+            return;
         }
 
         let dot_file = file_path
@@ -143,43 +143,64 @@ pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed:
             .unwrap_or(false);
 
         if dot_file {
-            continue 'next_file;
+            return;
         }
 
-        let file_type = file.file_type().map_err(|err| {
-            eprintln!("ERROR: could not determine type of file {file_path}: {err}",
-                      file_path = file_path.display());
-        })?;
-        let last_modified = file.metadata().map_err(|err| {
-            eprintln!("ERROR: could not get the metadata of file {file_path}: {err}",
-                      file_path = file_path.display());
-        })?.modified().map_err(|err| {
-            eprintln!("ERROR: could not get the last modification date of file {file_path}: {err}",
-                      file_path = file_path.display())
-        })?;
+        let extension = match file_path.extension() {
+            Some(ext) => ext.to_string_lossy().to_ascii_lowercase(),
+            None => return,
+        };
 
-        if file_type.is_dir() {
-            add_folder_to_model(&file_path, Arc::clone(&model), processed)?;
-            continue 'next_file;
+        match extension.as_str() {
+            // Allowlist: text, markup, source code, configs
+            "txt" | "md" | "xml" | "xhtml" | "pdf"
+            | "rs" | "js" | "jsx" | "ts" | "tsx"
+            | "json" | "toml" | "yaml" | "yml"
+            | "py" | "go" | "java" | "kt" | "kts"
+            | "c" | "h" | "hpp" | "hh" | "cpp" | "cc" | "cxx"
+            | "cs" | "rb" | "php"
+            | "html" | "htm" | "css" | "scss" | "less"
+            | "mdx" | "ini" | "cfg" | "conf"
+            | "sh" | "bash" | "zsh" | "fish"
+            | "pl" | "sql" | "gradle" | "properties"
+            | "r" | "tex" | "rst"
+            | "vue" | "svelte" | "dart" | "erl" | "ex" | "exs" | "lua" | "nim"
+                => { /* supported */ }
+            _ => return,
         }
 
-        // TODO: how does this work with symlinks?
+        let last_modified = match file_path.metadata().and_then(|m| m.modified()) {
+            Ok(time) => time,
+            Err(err) => {
+                eprintln!("ERROR: could not get metadata for {}: {}", file_path.display(), err);
+                return;
+            }
+        };
 
-        let mut model = model.lock().unwrap();
-        if model.requires_reindexing(&file_path, last_modified) {
-            
+        // Check if reindexing is needed - requires lock, but quick check
+        let needs_reindexing = {
+            let mut model = model.lock().unwrap();
+            model.requires_reindexing(file_path, last_modified)
+        };
 
-            let content = match parse_entire_file_by_extension(&file_path) {
+        if needs_reindexing {
+             // Parse content WITHOUT lock
+             let content = match parse_entire_file_by_extension(file_path) {
                 Ok(content) => content.chars().collect::<Vec<_>>(),
-                // TODO: still add the skipped files to the model to prevent their reindexing in the future
-                Err(()) => continue 'next_file,
+                Err(()) => return,
             };
 
-            model.add_document(file_path, last_modified, &content);
-            *processed += 1;
+            // Add to model WITH lock
+            {
+                let mut model = model.lock().unwrap();
+                model.add_document(file_path.clone(), last_modified, &content);
+            }
+            
+            processed_count.fetch_add(1, Ordering::SeqCst);
         }
-    }
+    });
 
+    *processed += processed_count.load(Ordering::SeqCst);
     Ok(())
 }
 
