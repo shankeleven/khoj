@@ -1,0 +1,50 @@
+# Patterns for files and folders that should not be indexed or searched by Khoj
+# VCS
+.git/
+.git/**
+
+# Rust build artifacts
+target/
+
+# Node modules
+node_modules/
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*~
+*.swp
+
+# Environment & secrets
+.env
+*.env
+
+# Caches and coverage
+.cache/
+coverage/
+
+# Binary and archive files
+*.exe
+*.dll
+*.so
+*.dylib
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Database files
+*.sqlite
+*.db
