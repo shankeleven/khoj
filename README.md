@@ -14,6 +14,21 @@ $ cargo run -- refresh or cargo build -- refresh # to refresh the index
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/45943c57-003d-4c84-b1fc-f1c715fad997" />
 
 
+## Benchmarks
+```console
+=== Indexing Benchmark ===
+Indexed 859 files in 3.54s
+Indexing Throughput: 242.98 files/sec
+Effectively: 23.1 MB/sec
+
+=== Search Benchmark ===
+Average Search Latency: 1.68ms
+
+=== Search Throughput Benchmark (5s) ===
+Total Queries: 2600
+Throughput: 518.58 QPS
+```
+
 ## Features
 
 ### Performance
