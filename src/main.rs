@@ -16,6 +16,7 @@ mod server;
 mod lexer;
 pub mod snowball;
 pub mod theme;
+mod ignore_rules;
 
 fn parse_entire_txt_file(file_path: &Path) -> Result<String, ()> {
     fs::read_to_string(file_path).map_err(|err| {
@@ -135,6 +136,12 @@ pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed:
 
         let file_path = file.path();
 
+        // Skip if matched by .khojignore
+        let is_dir_hint = file_path.is_dir();
+        if ignore_rules::is_ignored(&file_path, is_dir_hint) {
+            continue 'next_file;
+        }
+
         let dot_file = file_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -226,6 +233,9 @@ fn entry() -> Result<(), ()> {
                 usage(&program);
                 eprintln!("ERROR: no directory is provided for {subcommand} subcommand");
             })?;
+
+            // Initialize ignore rules from .khojignore
+            ignore_rules::init(Path::new(&dir_path));
 
             let mut index_path = Path::new(&dir_path).to_path_buf();
             index_path.push(".finder.json");

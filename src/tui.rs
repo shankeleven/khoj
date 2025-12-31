@@ -27,6 +27,7 @@ use std::process::{Command, Stdio};
 use crate::model::{Model};
 use crate::add_folder_to_model;
 use crate::theme::Theme;
+use crate::ignore_rules;
 
 const PREVIEW_FILL_LIMIT: usize = 100; // number of results to prefill preview for
 
@@ -69,6 +70,12 @@ impl Index {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+
+                // Skip if matched by .khojignore
+                let is_dir_hint = path.is_dir();
+                if ignore_rules::is_ignored(&path, is_dir_hint) {
+                    continue;
+                }
 
                 if path.is_file() {
                     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
@@ -301,6 +308,10 @@ pub fn main() -> Result<(), Box<dyn Error>> {
 
     // Determine working directory and index path
     let current_dir = env::current_dir()?;
+
+    // Initialize ignore rules from .khojignore
+    ignore_rules::init(&current_dir);
+
     let index_path = current_dir.join(".finder.json");
 
     // Prepare model, either by loading existing index or indexing afresh
