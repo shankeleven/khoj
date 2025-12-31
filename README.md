@@ -57,6 +57,4 @@ Throughput: 518.58 QPS
 |---------|-------------|
 | `--refresh`, `-r` | Rebuilds the index and ignores any existing `.finder.json`. |
 
-Example:
-
 
