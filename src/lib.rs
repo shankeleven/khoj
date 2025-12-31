@@ -190,10 +190,13 @@ pub fn add_folder_to_model(dir_path: &Path, model: Arc<Mutex<Model>>, processed:
                 Err(()) => return,
             };
 
-            // Add to model WITH lock
+            // Compute search data (tokenization) WITHOUT lock, in parallel
+            let (count, tf, positions) = Model::compute_search_data(&content);
+
+            // Add to model WITH lock - minimal critical section
             {
                 let mut model = model.lock().unwrap();
-                model.add_document(file_path.clone(), last_modified, &content);
+                model.add_document_precomputed(file_path.clone(), last_modified, count, tf, positions);
             }
             
             processed_count.fetch_add(1, Ordering::SeqCst);

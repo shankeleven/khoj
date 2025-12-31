@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use super::lexer::Lexer;
 use std::time::SystemTime;
 
-type DocFreq = HashMap<String, usize>;
-type TermFreq = HashMap<String, usize>;
+pub type DocFreq = HashMap<String, usize>;
+pub type TermFreq = HashMap<String, usize>;
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Model {
@@ -81,11 +81,8 @@ impl Model {
         result
     }
 
-    pub fn add_document(&mut self, file_path: PathBuf, last_modified: SystemTime, content: &[char]) {
-        self.remove_document(&file_path);
-
+    pub fn compute_search_data(content: &[char]) -> (usize, TermFreq, HashMap<String, Vec<usize>>) {
         let mut tf = TermFreq::new();
-
         let mut count = 0;
         let mut positions: HashMap<String, Vec<usize>> = HashMap::new();
         for (idx, t) in Lexer::new(content).enumerate() {
@@ -97,6 +94,18 @@ impl Model {
             positions.entry(t).or_default().push(idx);
             count += 1;
         }
+        (count, tf, positions)
+    }
+
+    pub fn add_document_precomputed(
+        &mut self,
+        file_path: PathBuf,
+        last_modified: SystemTime,
+        count: usize,
+        tf: TermFreq,
+        positions: HashMap<String, Vec<usize>>
+    ) {
+        self.remove_document(&file_path);
 
         for t in tf.keys() {
             if let Some(f) = self.df.get_mut(t) {
@@ -106,7 +115,12 @@ impl Model {
             }
         }
 
-    self.docs.insert(file_path, Doc {count, tf, last_modified, positions});
+        self.docs.insert(file_path, Doc {count, tf, last_modified, positions});
+    }
+
+    pub fn add_document(&mut self, file_path: PathBuf, last_modified: SystemTime, content: &[char]) {
+        let (count, tf, positions) = Self::compute_search_data(content);
+        self.add_document_precomputed(file_path, last_modified, count, tf, positions);
     }
 }
 
